@@ -1,0 +1,7 @@
+gradio>=3.0
+pandas>=1.0
+pillow>=8.0
+nltk>=3.5
+transformers>=4.0
+sentence-transformers>=2.2
+numpy>=1.21
