@@ -9,7 +9,7 @@ Quick start (Windows PowerShell):
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-python start2.py
+python Nisy_NLP_Gradio.py
 ```
 
 Open http://localhost:7860 in your browser.
