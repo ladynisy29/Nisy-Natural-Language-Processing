@@ -1,7 +1,7 @@
 
 # Gradio NLP Toolkit
 
-Integrated Gradio NLP Toolkit with multiple tabs (tokenization, sentiment, similarity, zero-shot, summarization).
+Integrated Gradio NLP Toolkit with multiple tabs (tokenization, sentiment, similarity, zero-shot, summarization, Named Entity Recognition (NER), Language Detection, Question Answering).
 
 Quick start (Windows PowerShell):
 

@@ -41,6 +41,80 @@ except Exception:
 	AutoModelForSeq2SeqLM = None
 
 try:
+	from langdetect import detect_langs, detect
+except Exception:
+	detect_langs = None
+	detect = None
+try:
+	from dateparser.search import search_dates
+except Exception:
+	search_dates = None
+
+# Friendly label mappings
+LABEL_MAP = {
+	"PER": "Person",
+	"PERSON": "Person",
+	"LOC": "Location",
+	"LOCATION": "Location",
+	"ORG": "Organization",
+	"ORGANIZATION": "Organization",
+	"MISC": "Misc",
+	"DATE": "Date",
+	"TIME": "Time",
+	"GPE": "Location",
+}
+
+# Common language code -> name map
+LANG_NAME = {
+	"en": "English",
+	"en-us": "English (US)",
+	"en-gb": "English (UK)",
+	"fr": "French",
+	"es": "Spanish",
+	"de": "German",
+	"it": "Italian",
+	"pt": "Portuguese",
+	"pt-br": "Portuguese (Brazil)",
+	"ru": "Russian",
+	"zh-cn": "Chinese (Simplified)",
+	"zh-tw": "Chinese (Traditional)",
+	"zh": "Chinese",
+	"ja": "Japanese",
+	"ko": "Korean",
+	"ar": "Arabic",
+	"hi": "Hindi",
+	"bn": "Bengali",
+	"pa": "Punjabi",
+	"vi": "Vietnamese",
+	"id": "Indonesian",
+	"nl": "Dutch",
+	"sv": "Swedish",
+	"no": "Norwegian",
+	"da": "Danish",
+	"fi": "Finnish",
+	"pl": "Polish",
+	"tr": "Turkish",
+	"cs": "Czech",
+	"el": "Greek",
+	"he": "Hebrew",
+	"uk": "Ukrainian",
+	"bg": "Bulgarian",
+	"ro": "Romanian",
+	"hu": "Hungarian",
+	"sk": "Slovak",
+	"sl": "Slovenian",
+	"hr": "Croatian",
+	"sr": "Serbian",
+	"lt": "Lithuanian",
+	"lv": "Latvian",
+	"et": "Estonian",
+	"af": "Afrikaans",
+	"sw": "Swahili",
+	"tl": "Tagalog",
+	"ms": "Malay",
+}
+
+try:
 	from sentence_transformers import SentenceTransformer
 except Exception:
 	SentenceTransformer = None
@@ -183,18 +257,18 @@ def sentiment_analyze(text: str) -> str:
 		s = numeric[0]
 		# If s looks like a probability in [0,1], use it directly; else apply sigmoid
 		if 0.0 <= s <= 1.0:
-			p_pos = s
+			prob_label = s
 		else:
 			# treat as logit
-			p_pos = 1.0 / (1.0 + math.exp(-s)) if isinstance(s, (int, float)) else 0.0
-		# Determine labels order
-		label = pairs[0][0].upper() if pairs[0][0] else ""
-		if "NEG" in label:
-			probs = [1 - p_pos, p_pos]
-			labels_out = ["NEGATIVE", "POSITIVE"]
+			prob_label = 1.0 / (1.0 + math.exp(-s)) if isinstance(s, (int, float)) else 0.0
+		# Determine primary label name and complementary label
+		label_raw = pairs[0][0].upper() if pairs[0][0] else ""
+		if "NEG" in label_raw:
+			primary, secondary = "NEGATIVE", "POSITIVE"
 		else:
-			probs = [p_pos, 1 - p_pos]
-			labels_out = ["POSITIVE", "NEGATIVE"]
+			primary, secondary = "POSITIVE", "NEGATIVE"
+		probs = [prob_label, 1 - prob_label]
+		labels_out = [primary, secondary]
 	else:
 		if not math.isclose(total, 1.0, rel_tol=1e-2):
 			probs = softmax(numeric)
@@ -275,6 +349,177 @@ def zero_shot_classify(text: str, labels_csv: str) -> str:
 	out = pipe(text, candidate_labels=labels)
 	lines = [f"- **{lab}**: {score*100:.1f}%" for lab, score in zip(out["labels"], out["scores"]) ]
 	return "\n".join(lines)
+
+
+# -----------------
+# NER tab
+# -----------------
+
+NER_PIPE = None
+
+def get_ner_pipeline(model_name: str = "dbmdz/bert-large-cased-finetuned-conll03-english"):
+	global NER_PIPE
+	if pipeline is None:
+		return None
+	if NER_PIPE is None:
+		try:
+			# aggregation_strategy may vary by transformers version
+			NER_PIPE = pipeline("ner", model=model_name, aggregation_strategy="simple")
+		except Exception:
+			try:
+				NER_PIPE = pipeline("ner", model=model_name, grouped_entities=True)
+			except Exception:
+				NER_PIPE = pipeline("ner", model=model_name)
+	return NER_PIPE
+
+
+def ner_extract(text: str) -> str:
+	if not text:
+		return "No text provided."
+	p = get_ner_pipeline()
+	if p is None:
+		return "transformers not installed"
+	try:
+		ents = p(text)
+		# ents may be list of dicts with entity/group
+		lines = []
+		for e in ents:
+			if isinstance(e, dict):
+				label = e.get("entity_group") or e.get("entity") or e.get("label")
+				# normalize label: remove common prefixes and uppercase
+				if isinstance(label, str):
+					# remove leading B- or I- if present, then uppercase
+					label_norm = label.upper().lstrip("BI-")
+				else:
+					label_norm = str(label)
+				word = e.get("word") or e.get("text") or e.get("entity")
+				score = e.get("score")
+				# map short labels to friendly names
+				friendly = LABEL_MAP.get(label_norm, None)
+				display_label = friendly if friendly is not None else (label_norm.title() if isinstance(label_norm, str) else str(label_norm))
+				if score is not None:
+					lines.append(f"- **{display_label}**: {word} ({score*100:.1f}%)")
+				else:
+					lines.append(f"- **{display_label}**: {word}")
+
+		# Additionally try to extract date-like expressions via regex (fallback)
+		date_patterns = [
+			r"\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b",  # 2020-01-31
+			r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",  # 01/31/2020 or 1-1-20
+			r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\b\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}",
+			r"\b\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?),?\s+\d{4}\b",
+		]
+		date_matches = []
+		for pat in date_patterns:
+			found = re.findall(pat, text, flags=re.IGNORECASE)
+			for f in found:
+				if f and f not in date_matches:
+					date_matches.append(f)
+
+		# Merge regex-found dates into the entity lines if not already present
+		for d in date_matches:
+			# avoid duplicates if an entity already contains the date string
+			if not any(d in l for l in lines):
+				lines.append(f"- **DATE**: {d}")
+
+		# If regex didn't find dates or to find additional formats, try dateparser.search.search_dates
+		if search_dates is not None:
+			try:
+				found = search_dates(text, settings={"STRICT_PARSING": True})
+				if found:
+					for orig, dt in found:
+						if orig and not any(orig in l for l in lines):
+							lines.append(f"- **DATE**: {orig}")
+			except Exception:
+				# ignore dateparser failures
+				pass
+
+		return "\n".join(lines) if lines else "No entities found."
+	except Exception as e:
+		return f"NER error: {e}"
+
+
+# -----------------
+# Language detection tab
+# -----------------
+
+def detect_language(text: str) -> str:
+	if not text:
+		return "No text provided."
+	# Try langdetect.detect_langs if available
+	if detect_langs is not None:
+		try:
+			probs = detect_langs(text)
+			if probs:
+				lines = []
+				for p in probs:
+					code = p.lang.lower()
+					name = LANG_NAME.get(code, p.lang)
+					lines.append(f"- {name}: {p.prob*100:.1f}%")
+				return "\n".join(lines)
+		except Exception:
+			pass
+
+	# Fallback: detect() which returns a single language
+	if detect is not None:
+		try:
+			lang = detect(text)
+			name = LANG_NAME.get(lang.lower(), lang)
+			return f"- {name}: 100%"
+		except Exception:
+			pass
+
+	# Final heuristic fallback: simple stopword matching for a few common languages
+	text_l = text.lower()
+	stopwords = {
+		"en": {"the", "and", "is", "in", "to", "of"},
+		"es": {"el", "y", "es", "en", "la", "de"},
+		"fr": {"le", "et", "est", "en", "la", "de"},
+	}
+	scores = {}
+	words = re.findall(r"\w+", text_l)
+	for code, stops in stopwords.items():
+		scores[code] = sum(1 for w in words if w in stops)
+	best = max(scores.items(), key=lambda x: x[1])
+	if best[1] > 0:
+		# approximate confidence by proportion of matched stopwords
+		conf = best[1] / max(1, len(words))
+		lang_name = LANG_NAME.get(best[0].lower(), best[0])
+		return f"- {lang_name}: {conf*100:.1f}% (heuristic)"
+
+	return "Could not reliably detect language. Install `langdetect` for better results."
+
+
+# -----------------
+# Question Answering tab
+# -----------------
+
+QA_PIPE = None
+
+def get_qa_pipeline(model_name: str = "distilbert-base-cased-distilled-squad"):
+	global QA_PIPE
+	if pipeline is None:
+		return None
+	if QA_PIPE is None:
+		QA_PIPE = pipeline("question-answering", model=model_name)
+	return QA_PIPE
+
+
+def answer_question(question: str, context: str) -> str:
+	if not question or not context:
+		return "Both question and context are required."
+	p = get_qa_pipeline()
+	if p is None:
+		return "transformers not installed"
+	try:
+		out = p(question=question, context=context)
+		if isinstance(out, dict):
+			ans = out.get("answer")
+			score = out.get("score")
+			return f"Answer: {ans}\nConfidence: {score*100:.1f}%"
+		return str(out)
+	except Exception as e:
+		return f"QA error: {e}"
 
 
 # -----------------
@@ -404,7 +649,7 @@ def preview_csv(file_obj):
 def build_ui():
 	example = "I am Lady Nisy and I love to explore and also love to learn and try out new things."
 	with gr.Blocks(title="Gradio NLP Toolkit") as demo:
-		gr.Markdown("# Nisy-NLP")
+		gr.Markdown("# Nisy Natural Language Processing Gradio Toolkit\n\nA multi-tab application showcasing various NLP tasks using Hugging Face transformers and other libraries. Each tab demonstrates a different NLP capability, with lazy loading of models for responsiveness.")
 		with gr.Tabs():
 			with gr.TabItem("Text Preprocessing (Tokenization)"):
 				with gr.Row():
@@ -430,8 +675,9 @@ def build_ui():
 
 			with gr.TabItem("Zero-Shot Topic Classification"):
 				z_txt = gr.Textbox(lines=3, value="The government passed a new regulation on data privacy.", label="Text")
-				z_labels = gr.Textbox(lines=1, value="Politics, Tech, Sports", label="Comma-separated labels")
-				z_btn = gr.Button("Classify")
+				with gr.Row():
+					z_labels = gr.Textbox(lines=1, value="Politics, Tech, Sports, Business, Health", label="Comma-separated labels", placeholder="Enter labels separated by commas")
+					z_btn = gr.Button("Classify")
 				z_out = gr.Markdown()
 				z_btn.click(zero_shot_classify, inputs=[z_txt, z_labels], outputs=z_out)
 
@@ -440,6 +686,25 @@ def build_ui():
 				sum_btn = gr.Button("Summarize")
 				sum_out = gr.Textbox(label="Summary")
 				sum_btn.click(summarize_text, inputs=sum_txt, outputs=sum_out)
+
+			with gr.TabItem("Named Entity Recognition (NER)"):
+				ner_txt = gr.Textbox(lines=4, value="I am Nisy, I live in Lille and I completed this project on 2nd March, 2026", label="Text for NER")
+				ner_btn = gr.Button("Extract Entities")
+				ner_out = gr.Markdown()
+				ner_btn.click(ner_extract, inputs=ner_txt, outputs=ner_out)
+
+			with gr.TabItem("Language Detection"):
+				lang_txt = gr.Textbox(lines=4, value="Bonjour, je suis mon amie, et je suis en train de terminer ce projet le 2 mars 2026.", label="Text for language detection")
+				lang_btn = gr.Button("Detect Language")
+				lang_out = gr.Markdown()
+				lang_btn.click(detect_language, inputs=lang_txt, outputs=lang_out)
+
+			with gr.TabItem("Question Answering"):
+				qa_context = gr.Textbox(lines=6, value="Nisy Adjei, a master's student at Junia is going to the mall." + "\n\n.", label="Context")
+				qa_question = gr.Textbox(lines=2, value="Who is Nisy?", label="Question")
+				qa_btn = gr.Button("Answer")
+				qa_out = gr.Textbox(label="Answer")
+				qa_btn.click(answer_question, inputs=[qa_question, qa_context], outputs=qa_out)
 
 		return demo
 
